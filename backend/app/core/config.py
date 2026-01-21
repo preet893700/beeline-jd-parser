@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     # AI Services - Ollama
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "mistral:7b"
-    OLLAMA_TIMEOUT: int = 600
+    OLLAMA_TIMEOUT: int = 120
     
     # AI Services - Gemini
     GEMINI_API_KEY: str = ""

@@ -15,6 +15,7 @@ from app.services.ai.ollama_service import OllamaService
 from app.services.ai.gemini_service import GeminiService
 from app.services.ai.openai_service import OpenAIService
 from app.services.ai.response_parser import AIResponseParser
+from app.services.ai.fallback_extractor import FallbackExtractor
 from app.repositories.jd_repository import JDRepository
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ class AIOrchestrator:
         self.gemini = GeminiService()
         self.openai = OpenAIService()
         self.parser = AIResponseParser()
+        self.fallback_extractor = FallbackExtractor()
         self.repository = JDRepository()
     
     async def extract_jd(
@@ -108,6 +110,17 @@ class AIOrchestrator:
         # Parse response
         result = self.parser.parse_extraction_response(raw_text, service_name)
         result.ai_extraction_timestamp = datetime.utcnow()
+        
+        # PERFORMANCE OPTIMIZATION: Only use fallback if bill_rate is missing
+        # Bill rate is the MOST critical field - if AI got it, we're good
+        if not result.bill_rate:
+            logger.info(f"AI missed bill_rate. Applying targeted fallback extraction.")
+            
+            # Only extract bill_rate via fallback (skip other fields for performance)
+            fallback_bill_rate = self.fallback_extractor.extract_bill_rate(jd_text)
+            if fallback_bill_rate:
+                result.bill_rate = fallback_bill_rate
+                logger.info(f"Fallback filled bill_rate: {fallback_bill_rate}")
         
         # Log success
         await self._log_success(
