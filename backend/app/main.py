@@ -2,6 +2,8 @@
 """
 JD Parser - FastAPI Main Application
 Enterprise-grade Job Description Parser with AI extraction
+
+UPDATED: Added progress tracking endpoint
 """
 
 from fastapi import FastAPI
@@ -12,7 +14,7 @@ import logging
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.db.mongodb import MongoDBClient
-from app.api.v1 import jd_excel, jd_text, health
+from app.api.v1 import jd_excel, jd_text, health, progress
 
 
 @asynccontextmanager
@@ -56,6 +58,7 @@ app.add_middleware(
 app.include_router(health.router, prefix="/api/v1", tags=["Health"])
 app.include_router(jd_excel.router, prefix="/api/v1/excel", tags=["Excel JD"])
 app.include_router(jd_text.router, prefix="/api/v1/text", tags=["Text JD"])
+app.include_router(progress.router, prefix="/api/v1", tags=["Progress"])  # NEW
 
 
 @app.get("/")

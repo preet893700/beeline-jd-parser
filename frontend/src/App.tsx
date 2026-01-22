@@ -1,4 +1,4 @@
-import React, { useState, createContext, useContext } from 'react';
+import React, { useState, createContext, useContext, useEffect, useRef } from 'react';
 import { Upload, FileText, Download, AlertCircle, CheckCircle, Loader2, Lock } from 'lucide-react';
 
 // ==================== TYPES & INTERFACES ====================
@@ -38,14 +38,22 @@ interface ExcelExtractionResponse {
   }>;
   request_id: string;
   total_processed: number;
+  success_count?: number;
+  failure_count?: number;
 }
 
-// CRITICAL: Single Source of Truth for JD Column Selection
 interface JDColumnSelection {
   sheetId: string | null;
   sheetName: string | null;
   columnIndex: number | null;
   columnHeader: string | null;
+}
+
+interface ProgressData {
+  request_id: string;
+  total: number;
+  processed: number;
+  complete: boolean;
 }
 
 // ==================== SELECTION CONTEXT (GLOBAL STATE) ====================
@@ -133,7 +141,7 @@ class JDParserAPI {
     sheetId: string,
     sheetName: string,
     columnIndex: number
-  ): Promise<ExcelExtractionResponse> {
+  ): Promise<{ request_id: string; status: string; message: string }> {
     const formData = new FormData();
     formData.append('file', file);
     formData.append('sheet_id', sheetId);
@@ -150,6 +158,22 @@ class JDParserAPI {
       throw new Error(error.detail || 'Extraction failed');
     }
     
+    return response.json();
+  }
+
+  async getExtractionStatus(requestId: string): Promise<any> {
+    const response = await fetch(`${this.baseURL}/excel/status/${requestId}`);
+    if (!response.ok) {
+      throw new Error('Failed to fetch status');
+    }
+    return response.json();
+  }
+
+  async getProgress(requestId: string): Promise<ProgressData> {
+    const response = await fetch(`${this.baseURL}/progress/${requestId}`);
+    if (!response.ok) {
+      throw new Error('Failed to fetch progress');
+    }
     return response.json();
   }
 
@@ -177,6 +201,32 @@ class JDParserAPI {
 
 const api = new JDParserAPI();
 
+// ==================== PROGRESS BAR COMPONENT ====================
+
+const ProgressBar: React.FC<{
+  total: number;
+  processed: number;
+}> = ({ total, processed }) => {
+  const percentage = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0;
+  
+  return (
+    <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-sm font-medium text-blue-900">
+          Processing {processed} / {total} records
+        </span>
+        <span className="text-sm font-bold text-blue-900">{percentage}%</span>
+      </div>
+      <div className="w-full bg-blue-100 rounded-full h-3 overflow-hidden">
+        <div
+          className="bg-blue-600 h-full transition-all duration-300 ease-out rounded-full"
+          style={{ width: `${percentage}%` }}
+        />
+      </div>
+    </div>
+  );
+};
+
 // ==================== EXCEL PREVIEW COMPONENT ====================
 
 const ExcelPreview: React.FC<{
@@ -194,14 +244,9 @@ const ExcelPreview: React.FC<{
   const canInteract = canSelectColumn(currentSheet.id);
 
   const handleColumnClick = (columnIndex: number, columnHeader: string) => {
-    // CRITICAL: Guard against cross-sheet selection
-    if (!canInteract) {
-      return; // HARD BLOCK
-    }
+    if (!canInteract) return;
 
-    // Toggle selection
     if (selection.columnIndex === columnIndex && selection.sheetId === currentSheet.id) {
-      // Deselect
       setSelection({
         sheetId: null,
         sheetName: null,
@@ -209,7 +254,6 @@ const ExcelPreview: React.FC<{
         columnHeader: null,
       });
     } else {
-      // Select
       setSelection({
         sheetId: currentSheet.id,
         sheetName: currentSheet.name,
@@ -395,8 +439,52 @@ const ExcelMode: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [extracting, setExtracting] = useState(false);
+  
+  // Progress tracking state
+  const [progress, setProgress] = useState<ProgressData | null>(null);
+  const [currentRequestId, setCurrentRequestId] = useState<string | null>(null);
+  const pollingIntervalRef = useRef<number | null>(null);
 
   const { selection, clearSelection } = useSelection();
+
+  // Cleanup polling on unmount
+  useEffect(() => {
+    return () => {
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current);
+      }
+    };
+  }, []);
+
+  // Poll progress when extracting
+  useEffect(() => {
+    if (extracting && currentRequestId) {
+      // Start polling
+      pollingIntervalRef.current = setInterval(async () => {
+        try {
+          const progressData = await api.getProgress(currentRequestId);
+          setProgress(progressData);
+          
+          // Stop polling when complete
+          if (progressData.complete) {
+            if (pollingIntervalRef.current) {
+              clearInterval(pollingIntervalRef.current);
+              pollingIntervalRef.current = null;
+            }
+          }
+        } catch (err) {
+          // Progress endpoint might not be ready yet, continue polling
+          console.log('Waiting for progress data...');
+        }
+      }, 500); // Poll every 500ms
+
+      return () => {
+        if (pollingIntervalRef.current) {
+          clearInterval(pollingIntervalRef.current);
+        }
+      };
+    }
+  }, [extracting, currentRequestId]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const uploadedFile = e.target.files?.[0];
@@ -407,7 +495,9 @@ const ExcelMode: React.FC = () => {
     setError(null);
     setPreviewData(null);
     setExtractionResults(null);
-    clearSelection(); // Reset global selection
+    setProgress(null);
+    setCurrentRequestId(null);
+    clearSelection();
 
     try {
       const data = await api.uploadExcel(uploadedFile);
@@ -421,7 +511,6 @@ const ExcelMode: React.FC = () => {
   };
 
   const handleExtract = async () => {
-    // CRITICAL VALIDATION: Ensure all required fields are present
     if (!file || !selection.sheetId || !selection.sheetName || selection.columnIndex === null) {
       setError('Invalid selection state. Please select a JD column.');
       return;
@@ -429,18 +518,79 @@ const ExcelMode: React.FC = () => {
 
     setExtracting(true);
     setError(null);
+    setProgress(null);
+    setExtractionResults(null);
 
     try {
-      const results = await api.extractFromExcel(
+      // Start extraction - get request_id immediately
+      const startResponse = await api.extractFromExcel(
         file,
         selection.sheetId,
         selection.sheetName,
         selection.columnIndex
       );
-      setExtractionResults(results);
+      
+      // Set request ID for polling
+      setCurrentRequestId(startResponse.request_id);
+      
+      // Wait for completion by polling progress
+      await waitForCompletion(startResponse.request_id);
+      
     } catch (err) {
       setError((err as Error).message);
-    } finally {
+      setExtracting(false);
+    }
+  };
+
+  const waitForCompletion = async (requestId: string) => {
+    // Poll until complete
+    let attempts = 0;
+    const maxAttempts = 300; // 5 minutes max (300 seconds)
+    
+    while (attempts < maxAttempts) {
+      try {
+        const status = await api.getExtractionStatus(requestId);
+        
+        console.log('Status check:', status);
+        
+        if (status.status === 'complete') {
+          // Build ExcelExtractionResponse from status
+          const results: ExcelExtractionResponse = {
+            request_id: requestId,
+            results: status.results || [],
+            total_processed: status.total_processed || 0,
+            success_count: status.success_count,
+            failure_count: status.failure_count
+          };
+          
+          // CRITICAL FIX: Set progress to 100% when complete
+          if (progress) {
+            setProgress({
+              request_id: requestId,
+              total: progress.total,
+              processed: progress.total, // Force 100%
+              complete: true
+            });
+          }
+          
+          setExtractionResults(results);
+          setExtracting(false);
+          console.log('Extraction complete!', results);
+          break;
+        }
+        
+        // Wait before next poll
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        attempts++;
+      } catch (err) {
+        console.error('Status check error:', err);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        attempts++;
+      }
+    }
+    
+    if (attempts >= maxAttempts) {
+      setError('Extraction timed out. Please check the status manually.');
       setExtracting(false);
     }
   };
@@ -503,6 +653,11 @@ const ExcelMode: React.FC = () => {
             <p className="text-sm text-red-700 mt-1">{error}</p>
           </div>
         </div>
+      )}
+
+      {/* Progress Bar - Show during extraction OR when complete */}
+      {(extracting || extractionResults) && progress && (
+        <ProgressBar total={progress.total} processed={progress.processed} />
       )}
 
       {previewData && (

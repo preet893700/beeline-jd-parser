@@ -1,47 +1,40 @@
 # app/api/v1/jd_excel.py
 """
 Excel JD Extraction Endpoints
+
+FINAL VERSION: Async extraction with proper caching
 """
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse
 import logging
 from io import BytesIO
 
-from app.services.jd.extractor import JDExtractor
+from app.services.jd.extractor import JDExtractor, get_cached_excel, get_cached_results
 from app.services.excel.reader import ExcelReader
-from app.core.exceptions import ExcelReadError, AIExtractionError
-from app.repositories.jd_repository import JDRepository
+from app.core.exceptions import ExcelReadError
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# In-memory storage for Excel files (use Redis in production)
+# In-memory storage for uploaded files
 excel_files_cache = {}
 
 
 @router.post("/upload")
 async def upload_excel(file: UploadFile = File(...)):
-    """
-    Upload Excel file and get preview
-    Returns sheet names, headers, and first 50 rows
-    """
+    """Upload Excel file and get preview"""
     try:
-        # Validate file
         if not file.filename.endswith(('.xlsx', '.xls')):
             raise HTTPException(
                 status_code=400,
                 detail="Invalid file type. Only .xlsx and .xls files are allowed"
             )
         
-        # Read file
         content = await file.read()
-        
-        # Parse Excel
         reader = ExcelReader()
         preview_data = await reader.read_file(content)
         
-        # Cache file for later extraction
         file_id = file.filename
         excel_files_cache[file_id] = content
         
@@ -60,33 +53,24 @@ async def upload_excel(file: UploadFile = File(...)):
 
 @router.post("/extract")
 async def extract_from_excel(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     sheet_id: str = Form(...),
     sheet_name: str = Form(...),
     jd_column_index: int = Form(...)
 ):
     """
-    Extract JD data from Excel file
-    Processes all JDs in the specified column from the specified sheet
-    
-    CRITICAL VALIDATIONS:
-    - sheet_id must exist in the file
-    - sheet_name must match sheet_id
-    - Only processes ONE sheet per request
-    - Rejects cross-sheet requests
+    Start extraction - returns immediately with request_id
+    Frontend polls /api/v1/progress/{request_id} for updates
     """
     try:
-        # CRITICAL: Validate sheet_id format
         if not sheet_id.startswith('sheet_'):
             raise HTTPException(
                 status_code=400,
                 detail="Invalid sheet_id format. Must start with 'sheet_'"
             )
         
-        # Read file
         content = await file.read()
-        
-        # CRITICAL: Verify sheet exists in file
         reader = ExcelReader()
         preview_data = await reader.read_file(content)
         
@@ -94,27 +78,31 @@ async def extract_from_excel(
         if sheet_id not in sheet_ids:
             raise HTTPException(
                 status_code=400,
-                detail=f"Sheet ID '{sheet_id}' not found in file. Available sheets: {sheet_ids}"
+                detail=f"Sheet ID '{sheet_id}' not found in file"
             )
         
-        # CRITICAL: Verify sheet_name matches sheet_id
         matching_sheet = next((s for s in preview_data["sheets"] if s["id"] == sheet_id), None)
         if not matching_sheet or matching_sheet["name"] != sheet_name:
             raise HTTPException(
                 status_code=400,
-                detail=f"Sheet name mismatch. Expected '{matching_sheet['name']}' for ID '{sheet_id}', got '{sheet_name}'"
+                detail=f"Sheet name mismatch"
             )
         
-        # CRITICAL: Validate column index is within bounds
         if jd_column_index < 0 or jd_column_index >= len(matching_sheet.get("headers", [])):
             raise HTTPException(
                 status_code=400,
-                detail=f"Column index {jd_column_index} out of bounds. Sheet has {len(matching_sheet.get('headers', []))} columns"
+                detail=f"Column index {jd_column_index} out of bounds"
             )
         
-        # Extract JDs - ONLY from the specified sheet
+        # Generate request_id
+        import uuid
+        request_id = str(uuid.uuid4())
+        
+        # Start background extraction
         extractor = JDExtractor()
-        response, excel_bytes = await extractor.extract_from_excel(
+        background_tasks.add_task(
+            extractor.extract_from_excel_background,
+            request_id=request_id,
             file_content=content,
             file_name=file.filename,
             sheet_id=sheet_id,
@@ -122,40 +110,57 @@ async def extract_from_excel(
             jd_column_index=jd_column_index
         )
         
-        # Cache result file
-        excel_files_cache[f"result_{response.request_id}"] = excel_bytes
+        logger.info(f"Started background extraction: {request_id}")
         
-        logger.info(
-            f"Extraction complete: request_id={response.request_id}, "
-            f"sheet_id={sheet_id}, sheet_name={sheet_name}, "
-            f"column_index={jd_column_index}, processed={response.total_processed}"
-        )
+        return {
+            "request_id": request_id,
+            "status": "processing",
+            "message": "Extraction started. Poll /api/v1/progress/{request_id} for updates."
+        }
         
-        return response
-        
-    except ExcelReadError as e:
-        logger.error(f"Excel processing error: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
-    except AIExtractionError as e:
-        logger.error(f"AI extraction error: {e}")
-        raise HTTPException(status_code=503, detail=f"AI extraction failed: {str(e)}")
     except HTTPException:
-        raise  # Re-raise HTTP exceptions
+        raise
     except Exception as e:
         logger.error(f"Extraction error: {e}")
         raise HTTPException(status_code=500, detail="Failed to extract JD data")
+
+
+@router.get("/status/{request_id}")
+async def get_extraction_status(request_id: str):
+    """Check if extraction is complete and get results"""
+    try:
+        results = get_cached_results(request_id)
+        
+        if results:
+            logger.info(f"Status check: {request_id} - COMPLETE with {results['total_processed']} results")
+            return {
+                "status": "complete",
+                "request_id": request_id,
+                "results": results["results"],
+                "total_processed": results["total_processed"],
+                "success_count": results.get("success_count", 0),
+                "failure_count": results.get("failure_count", 0)
+            }
+        else:
+            logger.debug(f"Status check: {request_id} - still processing")
+            return {
+                "status": "processing",
+                "request_id": request_id
+            }
+            
+    except Exception as e:
+        logger.error(f"Status check error for {request_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to check status")
 
 
 @router.get("/download/{request_id}")
 async def download_excel(request_id: str):
     """Download extraction results as Excel file"""
     try:
-        file_key = f"result_{request_id}"
+        excel_bytes = get_cached_excel(request_id)
         
-        if file_key not in excel_files_cache:
+        if not excel_bytes:
             raise HTTPException(status_code=404, detail="Result file not found")
-        
-        excel_bytes = excel_files_cache[file_key]
         
         return StreamingResponse(
             BytesIO(excel_bytes),
