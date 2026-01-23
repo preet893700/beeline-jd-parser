@@ -2,6 +2,8 @@
 """
 AI Service Orchestrator
 Manages fallback chain: Ollama → Gemini → OpenAI
+
+UPDATED: Adds min/max bill rate derivation after extraction
 """
 
 import logging
@@ -16,6 +18,7 @@ from app.services.ai.gemini_service import GeminiService
 from app.services.ai.openai_service import OpenAIService
 from app.services.ai.response_parser import AIResponseParser
 from app.services.ai.fallback_extractor import FallbackExtractor
+from app.services.billing.bill_rate_parser import parse_bill_rate  # NEW
 from app.repositories.jd_repository import JDRepository
 
 logger = logging.getLogger(__name__)
@@ -72,18 +75,14 @@ class AIOrchestrator:
                 last_error = e
                 logger.warning(f"{service_name} extraction failed: {e}")
                 
-                # Log failure
                 await self._log_failure(
                     request_id=request_id,
                     model_name=service_name,
                     model_type=service_type,
                     error_msg=str(e)
                 )
-                
-                # Continue to next service
                 continue
         
-        # All services failed
         logger.error("All AI services failed")
         raise AIServiceUnavailableError(
             "All AI services unavailable",
@@ -112,15 +111,22 @@ class AIOrchestrator:
         result.ai_extraction_timestamp = datetime.utcnow()
         
         # PERFORMANCE OPTIMIZATION: Only use fallback if bill_rate is missing
-        # Bill rate is the MOST critical field - if AI got it, we're good
         if not result.bill_rate:
             logger.info(f"AI missed bill_rate. Applying targeted fallback extraction.")
-            
-            # Only extract bill_rate via fallback (skip other fields for performance)
             fallback_bill_rate = self.fallback_extractor.extract_bill_rate(jd_text)
             if fallback_bill_rate:
                 result.bill_rate = fallback_bill_rate
                 logger.info(f"Fallback filled bill_rate: {fallback_bill_rate}")
+        
+        # NEW: Derive min/max bill rates from bill_rate
+        if result.bill_rate:
+            parsed_rates = parse_bill_rate(result.bill_rate)
+            result.min_bill_rate = parsed_rates["min_bill_rate"]
+            result.max_bill_rate = parsed_rates["max_bill_rate"]
+            logger.debug(
+                f"Derived rates from '{result.bill_rate}': "
+                f"min={result.min_bill_rate}, max={result.max_bill_rate}"
+            )
         
         # Log success
         await self._log_success(

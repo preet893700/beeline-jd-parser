@@ -18,6 +18,8 @@ interface SheetData {
 
 interface ExtractionResult {
   bill_rate: string | null;
+  min_bill_rate: number | null;  // NEW
+  max_bill_rate: number | null;  // NEW
   duration: string | null;
   experience_required: string | null;
   gbams_rgs_id: string | null;
@@ -271,6 +273,8 @@ const ExcelPreview: React.FC<{
     const headers = [...currentSheet.headers];
     const extractedHeaders = [
       'Bill Rate',
+      'Min Bill Rate',  // NEW
+      'Max Bill Rate',  // NEW
       'Duration',
       'Experience',
       'GBAMS/RGS ID',
@@ -297,6 +301,8 @@ const ExcelPreview: React.FC<{
     const extracted = result.extracted_data;
     const extractedValues = [
       extracted.bill_rate || '',
+      extracted.min_bill_rate !== null ? extracted.min_bill_rate.toString() : '',  // NEW
+      extracted.max_bill_rate !== null ? extracted.max_bill_rate.toString() : '',  // NEW
       extracted.duration || '',
       extracted.experience_required || '',
       extracted.gbams_rgs_id || '',
@@ -318,7 +324,7 @@ const ExcelPreview: React.FC<{
     selection.sheetId === currentSheet.id &&
     selection.columnIndex !== null &&
     idx > selection.columnIndex && 
-    idx <= selection.columnIndex + 8;
+    idx <= selection.columnIndex + 10;  // UPDATED: 10 columns now (was 8)
 
   return (
     <div className="border rounded-lg overflow-hidden bg-white">
@@ -373,7 +379,7 @@ const ExcelPreview: React.FC<{
                   selection.sheetId !== currentSheet.id ||
                   selection.columnIndex === null ||
                   idx <= selection.columnIndex || 
-                  idx > selection.columnIndex + 8;
+                  idx > selection.columnIndex + 10;  // UPDATED: 10 columns now
                 const isJDColumn = isColumnSelected(idx);
                 const isExtracted = isExtractedColumn(idx);
                 const canClick = isOriginalColumn && !extractionResults && canInteract;
@@ -818,6 +824,14 @@ const TextMode: React.FC = () => {
                   <tr className="hover:bg-gray-50">
                     <td className="px-4 py-3 font-medium text-gray-700">Bill Rate</td>
                     <td className="px-4 py-3">{result.bill_rate || 'N/A'}</td>
+                  </tr>
+                  <tr className="hover:bg-gray-50 bg-green-50">
+                    <td className="px-4 py-3 font-medium text-gray-700">Min Bill Rate</td>
+                    <td className="px-4 py-3">{result.min_bill_rate !== null ? result.min_bill_rate : 'N/A'}</td>
+                  </tr>
+                  <tr className="hover:bg-gray-50 bg-green-50">
+                    <td className="px-4 py-3 font-medium text-gray-700">Max Bill Rate</td>
+                    <td className="px-4 py-3">{result.max_bill_rate !== null ? result.max_bill_rate : 'N/A'}</td>
                   </tr>
                   <tr className="hover:bg-gray-50">
                     <td className="px-4 py-3 font-medium text-gray-700">Duration</td>

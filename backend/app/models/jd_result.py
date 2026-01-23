@@ -1,6 +1,8 @@
 # app/models/jd_result.py
 """
 Data Models for JD Extraction
+
+UPDATED: Added min_bill_rate and max_bill_rate derived fields
 """
 
 from pydantic import BaseModel, Field
@@ -19,6 +21,11 @@ class ExtractionStatus(str, Enum):
 class JDExtractionResult(BaseModel):
     """Structured JD extraction result"""
     bill_rate: Optional[str] = None
+    
+    # NEW: Derived fields (computed from bill_rate)
+    min_bill_rate: Optional[float] = None
+    max_bill_rate: Optional[float] = None
+    
     duration: Optional[str] = None
     experience_required: Optional[str] = None
     gbams_rgs_id: Optional[str] = None
@@ -37,10 +44,10 @@ class ExcelJDRequest(BaseModel):
     """Request model for Excel JD extraction"""
     request_id: str
     file_name: str
-    sheet_id: str  # CRITICAL: Unique sheet identifier
+    sheet_id: str
     sheet_name: str
     jd_column_index: int
-    jd_column_header: str  # CRITICAL: Column header for audit trail
+    jd_column_header: str
     total_rows: int
     created_at: datetime = Field(default_factory=datetime.utcnow)
 

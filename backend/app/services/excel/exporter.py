@@ -2,6 +2,8 @@
 """
 Excel File Exporter
 Creates Excel files with extraction results
+
+UPDATED: Added Min Bill Rate and Max Bill Rate columns
 """
 
 import openpyxl
@@ -39,9 +41,11 @@ class ExcelExporter:
             
             sheet = workbook[sheet_name]
             
-            # Define new column headers
+            # Define new column headers (UPDATED: Added Min/Max Bill Rate)
             new_headers = [
                 "Bill Rate",
+                "Min Bill Rate",  # NEW
+                "Max Bill Rate",  # NEW
                 "Duration",
                 "Experience",
                 "GBAMS/RGS ID",
@@ -73,8 +77,11 @@ class ExcelExporter:
                 row_num = result.row_index + 2  # +2 for header and 0-indexing
                 extracted = result.extracted_data
                 
+                # UPDATED: Added min/max bill rate values
                 values = [
                     extracted.bill_rate or "",
+                    extracted.min_bill_rate if extracted.min_bill_rate is not None else "",  # NEW
+                    extracted.max_bill_rate if extracted.max_bill_rate is not None else "",  # NEW
                     extracted.duration or "",
                     extracted.experience_required or "",
                     extracted.gbams_rgs_id or "",
